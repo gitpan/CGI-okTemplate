@@ -12,3 +12,5 @@ t/inc/body.inc
 t/inc/footer.inc
 t/inc/header.inc
 t/inc/test.inc
+examples/example1.pl
+examples/templates/example1.tpl

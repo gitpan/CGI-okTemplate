@@ -5,6 +5,7 @@ use strict;
 use Carp;
 use English;
 use warnings;
+use File::Spec;
 
 require Exporter;
 
@@ -27,8 +28,9 @@ our @EXPORT = qw(
 	
 );
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
+our $debug=0;
 
 # Preloaded methods go here.
 
@@ -38,12 +40,14 @@ sub new {
 
 	bless($self,$class);
 	$self->{___params} = {@_};
+	$debug = 1 if $self->{___params}->{Debug};
 	$self->{___params}->{BlockTag} = 'TemplateBlock' unless $self->{___params}->{BlockTag};
-	$self->{___params}->{RootDir} = `pwd` unless $self->{___params}->{RootDir};
-	chomp $self->{___params}->{RootDir};
-	$self->{___params}->{RootDir} .= '/';
-	$self->{___params}->{RootDir} =~ s!//!/!g;
-	confess "Root Dir have to be start with symbol '/'\n" unless ($self->{___params}->{RootDir} =~ /^\//);
+	if($self->{___params}->{RootDir}) {
+		$self->{___params}->{RootDir} = File::Spec->rel2abs($self->{___params}->{RootDir});
+	} else {
+		$self->{___params}->{RootDir} = File::Spec->rel2abs(File::Spec->curdir());
+	}
+	$self->{___params}->{RootDir} = ___clean_up_dirs(File::Spec->canonpath($self->{___params}->{RootDir}));
 	confess "Root Dir '$self->{___params}->{RootDir}' does not exists\n" unless (-d $self->{___params}->{RootDir});
 	$self->read_template($self->{___params}->{File}) if($self->{___params}->{File});
 
@@ -53,27 +57,33 @@ sub new {
 sub read_template {
 	my $self = shift;
 	my $file = shift;
-	$file = $self->{___params}->{File} unless ($file);
 
-	$file =~ s![^/]+/\.\./!/!g;
-	$file =~ s!/\.\./!/!g;
+	unless($file) {
+		confess "Parameter 'File' undefined in function 'read_template.'\n";
+	}
 
-	confess "File '$self->{___params}->{RootDir}$file' does not exists\n" unless (-r "$self->{___params}->{RootDir}$file");
+	unless(File::Spec->file_name_is_absolute( $file )) { # make absolute path to file
+		$file = File::Spec->catfile($self->{___params}->{RootDir},$file);
+	}
+
+	$file = ___clean_up_dirs(File::Spec->canonpath($file)); # delete up dirs from path
+	confess "File '$file' does not exists\n" unless (-r $file);
+
+	unless(___under_root($self->{___params}->{RootDir},$file)) {
+		confess "File '$file' does not under root dir '$self->{___params}->{RootDir}'\n";
+	}
+	
+	$self->{___params}->{File} = $file;
+
 	local($/) = undef;
-	open IN, "$self->{___params}->{RootDir}$file";
+	open IN, $file;
 	my $in = <IN>;
 	close IN;
-	my $cur_path = "$self->{___params}->{RootDir}$file";
-	$cur_path =~ s/[^\/]*$//;
-	$cur_path =~ s!//!/!g;
-	$in = ___read_includes($in,$cur_path,$self->{___params}->{RootDir});
-	$self->{___template___} = ___parse_template($in,$self->{___params}->{BlockTag},$cur_path,$self->{___params}->{RootDir});
-}
 
-sub parse {
-	my $self = shift;
-	my $data = shift || {};
-	___parse_data($self->{___template___},$data,$self->{___params}->{BlockTag});
+	my $cur_path = ___get_dir($file);
+	$in = ___read_includes($in,$cur_path,$self->{___params}->{RootDir});
+
+	$self->{___template___} = ___parse_template($in,$self->{___params}->{BlockTag},$cur_path,$self->{___params}->{RootDir});
 }
 
 sub ___read_includes {
@@ -84,26 +94,81 @@ sub ___read_includes {
 		my $pre_inc = $PREMATCH; # text before include
 		my $post_inc = $POSTMATCH; # text after include
 		my $include_filename = $1; # got include filename
-		$include_filename = $cur_path . $include_filename; # make full path to include file
-		$include_filename =~ s![^/]+/\.\./!/!g; #move up if needed
-		$include_filename =~ s!/\.\./!/!g;
-		unless(($include_filename =~ /^$root_path/) && (-e $include_filename)) {
-			$text = $pre_inc . 
+		unless(File::Spec->file_name_is_absolute( $include_filename )) {
+			$include_filename = File::Spec->catfile($cur_path,$include_filename);
+		}
+		$include_filename = ___clean_up_dirs(File::Spec->canonpath($include_filename)); # delete up dirs from path
+		unless(___under_root($root_path,$include_filename) && (-r $include_filename)) {
+			$text = $pre_inc;
+			if($debug) {
+				$text .=
 				"File '$include_filename' can't be included" .
-				" in this document because of wrong file path" .
-				$post_inc;
+				" in this document because of wrong file path";
+			}
+			$text .= $post_inc;
 		} else {
 			my $in = '';
 			local($/) = undef;
 			open IN, "< $include_filename";
 			$in = <IN>;
 			close IN;
-			my $new_cur_path = $include_filename;
-			$new_cur_path =~ s![^/]*$!!;
+			my $new_cur_path = ___get_dir($include_filename);
 			$text = $pre_inc . ___read_includes($in,$new_cur_path,$root_path) . $post_inc;
 		}
 	}
 	return $text;
+}
+
+sub ___clean_up_dirs {
+	my $path = shift;
+	my ($vol, $dirs, $file) = File::Spec->splitpath( $path, 1 );
+	my @path = File::Spec->splitdir( $dirs );
+	my $i;
+
+	for($i = 0; $i<$#path; $i++) {
+		if($path[$i] eq File::Spec->updir()) {
+			if($i) { # not first folder
+				$i--; # go 1 step up
+			} else { # first folder
+				shift @path;
+			}
+			redo;
+		}
+		if($path[$i+1] eq File::Spec->updir()) {
+			splice @path, $i, 2;
+			redo;
+		}
+	}
+
+	return File::Spec->catpath($vol,File::Spec->catdir(@path),$file);
+}
+
+
+sub ___under_root {
+	my $root = shift;
+	my $file = shift;
+
+	return $file =~ /^($root)/;
+}
+
+sub ___get_dir {
+	my $path = shift;
+	my ($vol, $dirs, $file) = File::Spec->splitpath( $path );
+
+	return File::Spec->catpath($vol,$dirs,''); # remove file
+}
+
+
+
+sub parse {
+	my $self = shift;
+	my $data = shift || {};
+	my $res;
+
+	$res = ___parse_data($self->{___template___},$data,$self->{___params}->{BlockTag});
+	$res =~ s/<%.*?%>//g unless $self->{___params}->{NoClean};
+
+	return $res;
 }
 
 sub ___parse_template {
@@ -151,9 +216,9 @@ sub ___parse_data {
 			$text_result .= $PREMATCH;
 			$text_level = $POSTMATCH;
 			foreach $block (@{$blocks{$block_name}}) {
-#				$text_result .= "<!--BlockParsed $block_name-->";
+				$text_result .= "<!--BlockParsed $block_name-->" if $debug;
 				$text_result .= ___parse_data($template->{___blocks___}->{$block_name},$block,$block_tag);
-#				$text_result .= "<!--/BlockParsed $block_name-->";
+				$text_result .= "<!--/BlockParsed $block_name-->" if $debug;
 			}
 		} else {
 			$text_result .= $text_level;
@@ -162,7 +227,7 @@ sub ___parse_data {
 	}
 
 	# put local macro value or leave for global value changes
-	$text_result =~ s/<%\s*(.+?)\s*%>/$data{$1} || "<% $1 %>"/ge;
+	$text_result =~ s/<%\s*(.+?)\s*%>/(exists $data{$1}) ?  $data{$1} : "<% $1 %>"/ge;
 	return $text_result;
 }
 
@@ -181,47 +246,132 @@ CGI::okTemplate - Perl extension for easy creating websites with using templates
   $tmp->read_template('t/test.tpl');
   print $tmp->parse($data);
 
+or
+
+  use CGI::okTemplate;
+  my $tmp = new CGI::okTemplate(File=>'t/test.tpl');
+  print $tmp->parse($data);
+
 =head1 DESCRIPTION
 
 This is an object oriented template module which parses template files
 and puts data instead of macros.
 
-Srtucture of the template file is:
+Template document can have 3 types of special TAGs:
 
-Document: <Items>
+=item <% {macroname} %>
 
-Items: <Item> | <Item><Items>
+	{macroname} - name of variable which will be changed to its value
 
-Item: <Text> | <Block> | <Macro> | NOTHING
+	if {macroname} undefined in currect block
+	it will be changed in outer block.
+	if {macroname} undefined in outer block also 
+	then this tag will be erased from document 
+	if function 'new' not receives parameter 'NoClean' 
+	or leave as is if parameter 'NoClean' not used
 
-Text: <Symbols>
+	you can put spaces between '<%' and '{macroname}' and '%>'
 
-Symbols: <Symbol> | <Symbol><Symbols>
+=item <!--Include {filename}-->
 
-Symbol: <NameSymbol> | !<NameSymbol>
+	this tag includes file named {filename} into current
+	template file.
 
-Block: <!--TemplateBlock <BlockName>--><Items><!--/TemplateBlock <BlockName>-->
+	{filename} can be relative (to current template path) 
+	or absolute path to the file
 
-BlockName: <NameSymbols>
+=item <!--{BlockTag} {blockname}-->...<!--/{BlockTag} {blockname}-->
 
-NameSymbols: <NameSymbol>[<NameSymbols>]
+	this tag defines the start and end of the block
+	{BlockTag} can be defined in function 'new' by parameter 'BlockTag'
+	default {BlockTag} is 'TemplateBlock'
 
-NameSymbol: ['A'..'Z''a'..'z''0'..'9''_'<Space>]
-
-Space: [\s\t]
-
-Macro: <%<Spaces>?<MacroName><Spaces>?%>
-
-Spaces: <Space> | <Space><Spaces>
-
-MacroName: <NameSymbols>
+	{blockname} is the name of block.
 
 
-You can put Blocks inside outer Blocks.
+=head1 FUNCTIONS
 
-Stub documentation for CGI::okTemplate, created by h2xs. It looks like the
-author of the extension was negligent enough to leave the stub
-unedited.
+=item new
+
+	creates new template object
+
+	use CGI::okTemplate;
+	my $tmp = new CGI::okTemplate();
+
+	Possible parameters:
+		BlockTag - defines the key work for block tags
+		File - path to template file (relative or absolute)
+		RootDir - dir where all templates have to be under (default is current dir)
+		NoClean - says to not clean tags for undefined variables
+		Debug - says to put an info into parsed document
+
+
+=head1 OBJECT FUNCTIONS
+
+=item read_template($filename)
+
+	defines template file named $filename to he template object
+	this function will overwrite the template data defined in 'new' function
+	if that function received 'File' parameter
+
+=item parse($data)
+
+	parses template with data sctructure $data
+
+	$data is the hash reference (see the section DATA STRUCTURE)
+
+=head1 DATA STRUCTURE
+
+Data for template is the hash reference.
+
+Hash can have 2 types of value for each key.
+
+	1) string value - it means that this element
+has value for {macroname} of current (or inner) block;
+
+	2) array reference - it means that this element
+has array of data for block named my key name;
+
+Example :
+
+ Perl Code (example1.pl): 
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+ #!/usr/bin/perl
+ use CGI::okTemplate;
+ my $tmpl = new CGI::Template(	File=>'templates/example1.tpl',
+				BlockTag=>'Block');
+
+ $data = {
+	header => 'value for "header" macro',
+	footer => 'value for "footer" macro',
+	row => [
+		{value => 'value1',},
+		{value => 'value2',},
+		{value => 'value3',},
+	],
+ };
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+Template File (templates/example1.tpl):
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+ <%header%>
+ <!--Block row--><%value%><!--/Block row-->
+ <%footer%>
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+The result have to be:
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+ value for "header" macro
+ value1
+ value2
+ value3
+ value for "footer" macro
+ -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+As we can see row has reference to the array of simple data structures for block named 'row'
+This array has 3 elemens. So this block will be parsed 3 times.
+
+See example folder for examples.
 
 =head2 EXPORT
 
@@ -231,18 +381,19 @@ None by default.
 
 =head1 SEE ALSO
 
-Mention other useful documentation such as the documentation of
-related modules or operating system documentation (such as man pages
-in UNIX), or any relevant external documentation such as RFCs or
-standards.
+examples/*.pl - for scripts
 
-If you have a mailing list set up for your module, mention it here.
+examples/templates/* - for templates
 
-If you have a web site set up for your module, mention it here.
+
+
+A mailing list for this module not opened yet.
+
+A web site for this and other my modules is under construction.
 
 =head1 AUTHOR
 
-Oleg Kobyakovskiy, E<lt>ok &at; softaddicts &dot; comE<gt>
+Oleg Kobyakovskiy, E<lt>ok.perl &at; gmail &dot; comE<gt>
 
 =head1 COPYRIGHT AND LICENSE
 
