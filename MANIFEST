@@ -1,0 +1,10 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+t/CGI-okTemplate.t
+t/test.tpl
+t/test.txt
+t/data.inc
+lib/CGI/okTemplate.pm
+META.yml                                 Module meta-data (added by MakeMaker)
