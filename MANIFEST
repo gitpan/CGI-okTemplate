@@ -8,3 +8,7 @@ t/test.txt
 t/data.inc
 lib/CGI/okTemplate.pm
 META.yml                                 Module meta-data (added by MakeMaker)
+t/inc/body.inc
+t/inc/footer.inc
+t/inc/header.inc
+t/inc/test.inc

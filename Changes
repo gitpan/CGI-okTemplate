@@ -1,5 +1,9 @@
 Revision history for Perl extension CGI::okTemplate.
 
+0.02  Sat Apr 02 00:08:42 2005
+	- added an 'Include' template operator
+	- block tag can be changed by the 'BlockTag' parameter of function 'new'
+	- template file can be assigned by 'File' parameter of function new
 0.01  Tue Mar 29 16:13:44 2005
 	- original version; created by h2xs 1.23 with options
 		-XA -n CGI::okTemplate
